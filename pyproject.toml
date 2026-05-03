@@ -1,0 +1,30 @@
+[project]
+name = "figdraw-typst-native"
+version = "0.1.0"
+description = "Native Typst backend for Matplotlib"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "matplotlib>=3.10.9",
+    "pillow>=12.0.0",
+    "typst>=0.14.8",
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = [
+    "typst_native_backend",
+    "typst_native_backend.templates",
+    "typst_native_backend.utils",
+]
+
+[tool.setuptools.package-data]
+typst_native_backend = ["templates/*.typ", "utils/*.typ"]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
