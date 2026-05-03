@@ -14,7 +14,7 @@ uv add "E:\LanguageSpecific\Typst\figdraw-typst-native"
 GitHub 依赖：
 
 ```powershell
-uv add "git+https://github.com/<user>/<repo>.git@v0.1.0"
+uv add "git+ssh://git@github.com/111inhistory/figdraw-typst-native.git"
 ```
 
 wheel 依赖：
