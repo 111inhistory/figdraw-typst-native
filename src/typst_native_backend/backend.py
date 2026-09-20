@@ -554,9 +554,10 @@ class RendererTypst(RendererBase):
             for key, value in style.items():
                 cur_curve.add_arg(value, name=key)
 
+        # Simplification follows matplotlib's `path.simplify` rcParam, as it
+        # does in the Agg and PGF backends.
         for vertices, code in path.iter_segments(
             transform,
-            simplify=False,
             clip=self._clip_bounds(gc) if clip else None,
         ):
             vertices: list[float] = [x / self.dpi * 72.0 for x in vertices]

@@ -16,6 +16,16 @@
 > **`query` 引擎已弃用**，将在后续版本移除。实际走到该引擎时会发出一次
 > `DeprecationWarning`。请安装 `figdraw-typst-native[core]`。
 
+### 路径简化
+
+折线路径按 matplotlib 的 `path.simplify` 处理（与 Agg、PGF 一致）：只有顶点到相邻
+两点连线的垂距小于 `path.simplify_threshold`（默认 1/9 px，在渲染器坐标里算）时
+才会被合并掉，且合并时保留该方向上的最远点，所以峰谷不会被抹平。E1 那张 11900
+点的 XRD 全谱因此从 11900 段压到 132 段，实测最大偏差 0.14 px（等效满量程
+0.05%）、400 dpi 栅格化后 0.026% 的像素不同，PDF 内容流从 71 KB 降到约 5 KB。
+
+需要逐点原始折线时：`mpl.rcParams["path.simplify"] = False`。
+
 ### 已知限制
 
 `core` 引擎的字体来自构造时的 `typst.font_paths` / `typst.ignore_system_fonts`

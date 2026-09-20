@@ -1,6 +1,6 @@
 [project]
 name = "figdraw-typst-native"
-version = "0.2.0"
+version = "0.2.1"
 description = "Native Typst backend for Matplotlib"
 readme = "README.md"
 license = "MIT"
