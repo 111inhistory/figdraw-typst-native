@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from .backend import (
     TypstNativeConfig,
+    clear_cache,
     configure,
     get_config,
+    load_cache,
     register_rcparams,
     reset_config,
+    save_cache,
 )
 
 
@@ -17,9 +20,12 @@ def use(*, force: bool = True) -> None:
 
 __all__ = [
     "TypstNativeConfig",
+    "clear_cache",
     "configure",
     "get_config",
+    "load_cache",
     "register_rcparams",
     "reset_config",
+    "save_cache",
     "use",
 ]

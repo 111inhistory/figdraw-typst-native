@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import functools
 import json
 import math
 import os
@@ -150,6 +151,26 @@ def _font_code(font: str | Sequence[str] | Raw) -> str:
     return "(" + ", ".join(f'"{normalize_string(item)}"' for item in font) + ")"
 
 
+def _strip_mathdefault(s: str) -> str:
+    while r"\mathdefault{" in s:
+        idx = s.find(r"\mathdefault{")
+        start = idx + len(r"\mathdefault{")
+        depth = 1
+        end = start
+        while end < len(s) and depth > 0:
+            if s[end] == "{":
+                depth += 1
+            elif s[end] == "}":
+                depth -= 1
+            end += 1
+        if depth == 0:
+            content = s[start : end - 1]
+            s = s[:idx] + content + s[end:]
+        else:
+            break
+    return s
+
+
 def _text_body(text: str, ismath) -> Content:
     text_content = text.replace(r"\$", "$")
     if ismath not in (True, "TeX"):
@@ -161,7 +182,7 @@ def _text_body(text: str, ismath) -> Content:
     if len(dollar_indices) == 0:
         if ismath is not True:
             return Content(text_content)
-        fragment = re.sub(r"\\mathdefault\{([^{}]*)\}", r"\1", text.strip())
+        fragment = _strip_mathdefault(text.strip())
         return Content(Command("mi", Raw(f'"{normalize_string(fragment)}"')))
     if len(dollar_indices) % 2 != 0:
         return Content(text_content)
@@ -171,9 +192,7 @@ def _text_body(text: str, ismath) -> Content:
     for start, end in zip(dollar_indices[0::2], dollar_indices[1::2], strict=True):
         if start > cursor:
             parts.append(text[cursor:start].replace(r"\$", "$"))
-        fragment = re.sub(
-            r"\\mathdefault\{([^{}]*)\}", r"\1", text[start + 1 : end].strip()
-        )
+        fragment = _strip_mathdefault(text[start + 1 : end].strip())
         parts.append(Command("mi", Raw(f'"{normalize_string(fragment)}"')))
         cursor = end + 1
     if cursor < len(text):
@@ -201,6 +220,108 @@ def _config_from_kwargs(kwargs: dict[str, Any]) -> TypstNativeConfig:
     return replace(config, **updates) if updates else config
 
 
+class TypstTextMeasurer:
+    """Manages text measurement with a bounded in-memory LRU cache."""
+
+    def __init__(self, config: TypstNativeConfig, maxsize: int = 4096):
+        self.config = config
+        self.maxsize = maxsize
+        self._cache: dict[
+            tuple[str, float, bool | str, tuple[str, ...]],
+            tuple[float, float, float],
+        ] = {}
+
+    def measure(
+        self, text: str, size: float, ismath: bool | str, font_names: tuple[str, ...]
+    ) -> tuple[float, float, float]:
+        key = (text, size, ismath, font_names)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        metrics = self._measure_uncached(text, size, ismath, font_names)
+        if len(self._cache) >= self.maxsize:
+            del self._cache[next(iter(self._cache))]
+        self._cache[key] = metrics
+        return metrics
+
+    def _measure_uncached(
+        self, text: str, size: float, ismath: bool | str, font_names: tuple[str, ...]
+    ) -> tuple[float, float, float]:
+        text_body = _text_body(text, ismath).to_code(in_content=True)
+        source = Template(
+            Path(self.config.text_measure_template).read_text(encoding="utf-8")
+        ).substitute(
+            font_size=Length(size).to_code(),
+            text_font=_font_code(self.config.font),
+            text_top_edge=self.config.text_top_edge,
+            par_leading=self.config.par_leading,
+            par_spacing=self.config.par_spacing,
+            measure_preamble=self.config.measure_preamble,
+            text_body=text_body,
+        )
+        raw = typst.query(
+            source.encode("utf-8"),
+            "<measure>",
+            field="value",
+            one=True,
+            root=str(PACKAGE_DIR),
+        )
+        data = json.loads(raw)
+        width_pt = float(data["p2"]["x"]) - float(data["p0"]["x"])
+        height_pt = float(data["p3"]["y"]) - float(data["p0"]["y"])
+        descent_pt = float(data["p3"]["y"]) - float(data["p1"]["y"])
+        return (width_pt, height_pt, descent_pt)
+
+
+@functools.lru_cache(maxsize=8)
+def _get_text_measurer(config: TypstNativeConfig) -> TypstTextMeasurer:
+    return TypstTextMeasurer(config)
+
+
+def clear_cache() -> None:
+    """Clear in-memory text measurement caches."""
+    _get_text_measurer.cache_clear()
+
+
+def save_cache(file_path: str | os.PathLike) -> None:
+    """Explicitly save in-memory cache to a user-specified file path."""
+    path = Path(file_path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    measurer = _get_text_measurer(get_config())
+    data = {
+        json.dumps(list(k), ensure_ascii=False): list(v)
+        for k, v in measurer._cache.items()
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_cache(file_path: str | os.PathLike) -> int:
+    """Explicitly load cache from a user-specified file path."""
+    path = Path(file_path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Cache file not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    measurer = _get_text_measurer(get_config())
+    count = 0
+    if isinstance(data, dict):
+        for k_str, v in data.items():
+            if isinstance(v, list) and len(v) == 3:
+                raw_k = json.loads(k_str)
+                k_tuple = (
+                    str(raw_k[0]),
+                    float(raw_k[1]),
+                    raw_k[2],
+                    tuple(raw_k[3]),
+                )
+                measurer._cache[k_tuple] = (float(v[0]), float(v[1]), float(v[2]))
+                count += 1
+    return count
+
+
+
 MARKER_KEY_TOL = 1e-7
 MARKER_KEY_SCALE = round(1 / MARKER_KEY_TOL)
 MarkerKey = tuple[tuple[int, ...] | None, tuple[int, ...], tuple[tuple[str, str], ...]]
@@ -226,7 +347,6 @@ class RendererTypst(RendererBase):
         self.output_dir = output_dir
         self.image_prefix = image_prefix
         self.image_counter = 0
-        self._text_measure_cache: dict[tuple[Any, ...], tuple[float, float, float]] = {}
         self._agg = RendererAgg(
             int(math.ceil(figure.get_figwidth() * self.dpi)),
             int(math.ceil(figure.get_figheight() * self.dpi)),
@@ -243,62 +363,25 @@ class RendererTypst(RendererBase):
         return (self.width_pt * self.dpi / 72.0, self.height_pt * self.dpi / 72.0)
 
     def get_text_width_height_descent(self, s, prop, ismath):
-        """Measure text size by querying a Typst document with cache"""
+        """Measure text size using Typst with bounded in-memory LRU cache."""
         if "\n" in str(s):
             return self._agg.get_text_width_height_descent(s, prop, ismath)
 
         font_names = tuple(prop.get_family())
         size = float(prop.get_size_in_points())
-        cache_key = (
-            str(s),
-            size,
-            ismath,
-            font_names,
-            str(self.config.text_measure_template),
-            str(self.config.font),
-            self.config.text_top_edge,
-            self.config.par_leading,
-            self.config.par_spacing,
-            self.config.measure_preamble,
-        )
-        cached = self._text_measure_cache.get(cache_key)
-        if cached is not None:
-            return cached
+        measurer = _get_text_measurer(self.config)
 
         try:
-            text_body = _text_body(str(s), ismath).to_code(in_content=True)
-            source = Template(
-                Path(self.config.text_measure_template).read_text(encoding="utf-8")
-            ).substitute(
-                font_size=Length(size).to_code(),
-                text_font=_font_code(self.config.font),
-                text_top_edge=self.config.text_top_edge,
-                par_leading=self.config.par_leading,
-                par_spacing=self.config.par_spacing,
-                measure_preamble=self.config.measure_preamble,
-                text_body=text_body,
+            width_pt, height_pt, descent_pt = measurer.measure(
+                str(s), size, ismath, font_names
             )
-            raw = typst.query(
-                source.encode("utf-8"),
-                "<measure>",
-                field="value",
-                one=True,
-                root=str(PACKAGE_DIR),
+            return (
+                self.points_to_pixels(width_pt),
+                self.points_to_pixels(height_pt),
+                self.points_to_pixels(descent_pt),
             )
-            data = json.loads(raw)
-            width = float(data["p2"]["x"]) - float(data["p0"]["x"])
-            height = float(data["p3"]["y"]) - float(data["p0"]["y"])
-            descent = float(data["p3"]["y"]) - float(data["p1"]["y"])
-            result = (
-                self.points_to_pixels(width),
-                self.points_to_pixels(height),
-                self.points_to_pixels(descent),
-            )
-        except Exception as e:
-            result = self._agg.get_text_width_height_descent(s, prop, ismath)
-
-        self._text_measure_cache[cache_key] = result
-        return result
+        except Exception:
+            return self._agg.get_text_width_height_descent(s, prop, ismath)
 
     def _clip_bounds(self, gc):
         bbox = gc.get_clip_rectangle()
