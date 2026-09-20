@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import codecs
-import functools
 import json
 import math
 import os
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -34,6 +32,7 @@ from .typst_core import (  # noqa: F401
     Raw,
     Rgb,
     TypstType,
+    math_text,
     normalize_string,
 )
 
@@ -47,6 +46,26 @@ DOCUMENT_TEMPLATE = PACKAGE_DIR / "templates" / "native_document.typ"
 TEXT_MEASURE_TEMPLATE = PACKAGE_DIR / "templates" / "text_measure.typ"
 PAGE_PADDING_PT = 12.0
 
+try:
+    import mpl_typst_core
+    _HAS_CORE = True
+except ImportError:
+    _HAS_CORE = False
+
+_CORE_MEASURER = None
+
+def _get_core_measurer():
+    global _CORE_MEASURER
+    if _CORE_MEASURER is None and _HAS_CORE:
+        font_paths = mpl.rcParams.get("typst.font_paths")
+        paths = list(font_paths) if font_paths else []
+        ignore_sys = bool(mpl.rcParams.get("typst.ignore_system_fonts"))
+        _CORE_MEASURER = mpl_typst_core.TypstCoreMeasurer(
+            extra_font_paths=paths,
+            include_system_fonts=not ignore_sys
+        )
+    return _CORE_MEASURER
+
 
 @dataclass(frozen=True)
 class TypstNativeConfig:
@@ -59,6 +78,7 @@ class TypstNativeConfig:
     par_spacing: str = "0pt"
     preamble: str = ""
     measure_preamble: str = ""
+    engine: str = "auto"
 
 
 _CONFIG = TypstNativeConfig()
@@ -72,6 +92,7 @@ _RC_DEFAULTS: dict[str, Any] = {
     "typst.par_spacing": "0pt",
     "typst.preamble": "",
     "typst.measure_preamble": "",
+    "typst.engine": "auto",
     "typst.root": None,
     "typst.font_paths": None,
     "typst.ignore_system_fonts": None,
@@ -89,6 +110,7 @@ _CONFIG_FIELDS = {
     "par_spacing": "typst.par_spacing",
     "preamble": "typst.preamble",
     "measure_preamble": "typst.measure_preamble",
+    "engine": "typst.engine",
 }
 
 
@@ -131,6 +153,7 @@ def get_config() -> TypstNativeConfig:
         par_spacing=mpl.rcParams["typst.par_spacing"],
         preamble=mpl.rcParams["typst.preamble"],
         measure_preamble=mpl.rcParams["typst.measure_preamble"],
+        engine=mpl.rcParams.get("typst.engine", "auto"),
     )
 
 
@@ -151,55 +174,6 @@ def _font_code(font: str | Sequence[str] | Raw) -> str:
     return "(" + ", ".join(f'"{normalize_string(item)}"' for item in font) + ")"
 
 
-def _strip_mathdefault(s: str) -> str:
-    while r"\mathdefault{" in s:
-        idx = s.find(r"\mathdefault{")
-        start = idx + len(r"\mathdefault{")
-        depth = 1
-        end = start
-        while end < len(s) and depth > 0:
-            if s[end] == "{":
-                depth += 1
-            elif s[end] == "}":
-                depth -= 1
-            end += 1
-        if depth == 0:
-            content = s[start : end - 1]
-            s = s[:idx] + content + s[end:]
-        else:
-            break
-    return s
-
-
-def _text_body(text: str, ismath) -> Content:
-    text_content = text.replace(r"\$", "$")
-    if ismath not in (True, "TeX"):
-        return Content(text_content)
-
-    dollar_indices = [
-        match.end() - 1 for match in re.finditer(r"(?<!\\)(?:\\\\)*\$", text)
-    ]
-    if len(dollar_indices) == 0:
-        if ismath is not True:
-            return Content(text_content)
-        fragment = _strip_mathdefault(text.strip())
-        return Content(Command("mi", Raw(f'"{normalize_string(fragment)}"')))
-    if len(dollar_indices) % 2 != 0:
-        return Content(text_content)
-
-    parts: list[TypstType] = []
-    cursor = 0
-    for start, end in zip(dollar_indices[0::2], dollar_indices[1::2], strict=True):
-        if start > cursor:
-            parts.append(text[cursor:start].replace(r"\$", "$"))
-        fragment = _strip_mathdefault(text[start + 1 : end].strip())
-        parts.append(Command("mi", Raw(f'"{normalize_string(fragment)}"')))
-        cursor = end + 1
-    if cursor < len(text):
-        parts.append(text[cursor:].replace(r"\$", "$"))
-    return Content(*parts)
-
-
 def _config_from_kwargs(kwargs: dict[str, Any]) -> TypstNativeConfig:
     config = kwargs.pop("typst_config", None) or get_config()
     updates: dict[str, Any] = {}
@@ -218,108 +192,6 @@ def _config_from_kwargs(kwargs: dict[str, Any]) -> TypstNativeConfig:
         if key in kwargs:
             updates[field] = kwargs.pop(key)
     return replace(config, **updates) if updates else config
-
-
-class TypstTextMeasurer:
-    """Manages text measurement with a bounded in-memory LRU cache."""
-
-    def __init__(self, config: TypstNativeConfig, maxsize: int = 4096):
-        self.config = config
-        self.maxsize = maxsize
-        self._cache: dict[
-            tuple[str, float, bool | str, tuple[str, ...]],
-            tuple[float, float, float],
-        ] = {}
-
-    def measure(
-        self, text: str, size: float, ismath: bool | str, font_names: tuple[str, ...]
-    ) -> tuple[float, float, float]:
-        key = (text, size, ismath, font_names)
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
-
-        metrics = self._measure_uncached(text, size, ismath, font_names)
-        if len(self._cache) >= self.maxsize:
-            del self._cache[next(iter(self._cache))]
-        self._cache[key] = metrics
-        return metrics
-
-    def _measure_uncached(
-        self, text: str, size: float, ismath: bool | str, font_names: tuple[str, ...]
-    ) -> tuple[float, float, float]:
-        text_body = _text_body(text, ismath).to_code(in_content=True)
-        source = Template(
-            Path(self.config.text_measure_template).read_text(encoding="utf-8")
-        ).substitute(
-            font_size=Length(size).to_code(),
-            text_font=_font_code(self.config.font),
-            text_top_edge=self.config.text_top_edge,
-            par_leading=self.config.par_leading,
-            par_spacing=self.config.par_spacing,
-            measure_preamble=self.config.measure_preamble,
-            text_body=text_body,
-        )
-        raw = typst.query(
-            source.encode("utf-8"),
-            "<measure>",
-            field="value",
-            one=True,
-            root=str(PACKAGE_DIR),
-        )
-        data = json.loads(raw)
-        width_pt = float(data["p2"]["x"]) - float(data["p0"]["x"])
-        height_pt = float(data["p3"]["y"]) - float(data["p0"]["y"])
-        descent_pt = float(data["p3"]["y"]) - float(data["p1"]["y"])
-        return (width_pt, height_pt, descent_pt)
-
-
-@functools.lru_cache(maxsize=8)
-def _get_text_measurer(config: TypstNativeConfig) -> TypstTextMeasurer:
-    return TypstTextMeasurer(config)
-
-
-def clear_cache() -> None:
-    """Clear in-memory text measurement caches."""
-    _get_text_measurer.cache_clear()
-
-
-def save_cache(file_path: str | os.PathLike) -> None:
-    """Explicitly save in-memory cache to a user-specified file path."""
-    path = Path(file_path).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    measurer = _get_text_measurer(get_config())
-    data = {
-        json.dumps(list(k), ensure_ascii=False): list(v)
-        for k, v in measurer._cache.items()
-    }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def load_cache(file_path: str | os.PathLike) -> int:
-    """Explicitly load cache from a user-specified file path."""
-    path = Path(file_path).resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"Cache file not found: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    measurer = _get_text_measurer(get_config())
-    count = 0
-    if isinstance(data, dict):
-        for k_str, v in data.items():
-            if isinstance(v, list) and len(v) == 3:
-                raw_k = json.loads(k_str)
-                k_tuple = (
-                    str(raw_k[0]),
-                    float(raw_k[1]),
-                    raw_k[2],
-                    tuple(raw_k[3]),
-                )
-                measurer._cache[k_tuple] = (float(v[0]), float(v[1]), float(v[2]))
-                count += 1
-    return count
-
 
 
 MARKER_KEY_TOL = 1e-7
@@ -347,6 +219,7 @@ class RendererTypst(RendererBase):
         self.output_dir = output_dir
         self.image_prefix = image_prefix
         self.image_counter = 0
+        self._text_measure_cache: dict[tuple[Any, ...], tuple[float, float, float]] = {}
         self._agg = RendererAgg(
             int(math.ceil(figure.get_figwidth() * self.dpi)),
             int(math.ceil(figure.get_figheight() * self.dpi)),
@@ -363,25 +236,95 @@ class RendererTypst(RendererBase):
         return (self.width_pt * self.dpi / 72.0, self.height_pt * self.dpi / 72.0)
 
     def get_text_width_height_descent(self, s, prop, ismath):
-        """Measure text size using Typst with bounded in-memory LRU cache."""
+        """Measure text size by querying a Typst document with cache"""
         if "\n" in str(s):
             return self._agg.get_text_width_height_descent(s, prop, ismath)
 
         font_names = tuple(prop.get_family())
         size = float(prop.get_size_in_points())
-        measurer = _get_text_measurer(self.config)
+        cache_key = (
+            str(s),
+            size,
+            ismath,
+            font_names,
+            str(self.config.text_measure_template),
+            str(self.config.font),
+            self.config.text_top_edge,
+            self.config.par_leading,
+            self.config.par_spacing,
+            self.config.measure_preamble,
+        )
+        cached = self._text_measure_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if self.config.engine in ("core", "auto") and _HAS_CORE:
+            measurer = _get_core_measurer()
+            if measurer is not None:
+                try:
+                    w, h, d = measurer.measure_text(
+                        str(s),
+                        font_family=self.config.font,
+                        font_size_pt=size,
+                        is_math=bool(ismath),
+                        top_edge=self.config.text_top_edge,
+                        bottom_edge="baseline",
+                    )
+                    result = (
+                        self.points_to_pixels(w),
+                        self.points_to_pixels(h),
+                        self.points_to_pixels(d),
+                    )
+                    self._text_measure_cache[cache_key] = result
+                    return result
+                except Exception:
+                    if self.config.engine == "core":
+                        raise
 
         try:
-            width_pt, height_pt, descent_pt = measurer.measure(
-                str(s), size, ismath, font_names
+            is_math = ismath is True or (
+                ismath == "TeX"
+                and str(s).strip().startswith("$")
+                and str(s).strip().endswith("$")
             )
-            return (
-                self.points_to_pixels(width_pt),
-                self.points_to_pixels(height_pt),
-                self.points_to_pixels(descent_pt),
+            body_obj = math_text(str(s)) if is_math else str(s)
+            text_body = (
+                body_obj.to_code(in_content=True)
+                if hasattr(body_obj, "to_code")
+                else str(body_obj)
+            )
+            source = Template(
+                Path(self.config.text_measure_template).read_text(encoding="utf-8")
+            ).substitute(
+                font_size=Length(size).to_code(),
+                text_font=_font_code(self.config.font),
+                text_top_edge=self.config.text_top_edge,
+                par_leading=self.config.par_leading,
+                par_spacing=self.config.par_spacing,
+                measure_preamble=self.config.measure_preamble,
+                text_body=text_body,
+            )
+            raw = typst.query(
+                source.encode("utf-8"),
+                "<measure>",
+                field="value",
+                one=True,
+                root=str(PACKAGE_DIR),
+            )
+            data = json.loads(raw)
+            width = float(data["p2"]["x"]) - float(data["p0"]["x"])
+            height = float(data["p3"]["y"]) - float(data["p0"]["y"])
+            descent = float(data["p3"]["y"]) - float(data["p1"]["y"])
+            result = (
+                self.points_to_pixels(width),
+                self.points_to_pixels(height),
+                self.points_to_pixels(descent),
             )
         except Exception:
-            return self._agg.get_text_width_height_descent(s, prop, ismath)
+            result = self._agg.get_text_width_height_descent(s, prop, ismath)
+
+        self._text_measure_cache[cache_key] = result
+        return result
 
     def _clip_bounds(self, gc):
         bbox = gc.get_clip_rectangle()
@@ -603,7 +546,13 @@ class RendererTypst(RendererBase):
         if len(rgb) < 3:
             raise ValueError("text color must contain at least RGB channels")
 
-        body = _text_body(str(s), ismath)
+        text_source = str(s).strip()
+        is_math = ismath is True or (
+            ismath == "TeX"
+            and text_source.startswith("$")
+            and text_source.endswith("$")
+        )
+        body = math_text(str(s)) if is_math else Content(str(s))
         text = Command(
             "text",
             body,
@@ -747,19 +696,11 @@ class FigureCanvasTypstNative(FigureCanvasBase):
 
     def print_typ(self, filename, **kwargs):
         config = _config_from_kwargs(kwargs)
-        for key in (
-            "bbox_inches_restore",
-            "facecolor",
-            "edgecolor",
-            "orientation",
-            "metadata",
-        ):
+        for key in ("bbox_inches_restore", "facecolor", "edgecolor", "orientation", "metadata"):
             kwargs.pop(key, None)
         if kwargs:
             names = ", ".join(sorted(kwargs))
-            raise TypeError(
-                f"unsupported savefig argument(s) for Typst backend: {names}"
-            )
+            raise TypeError(f"unsupported savefig argument(s) for Typst backend: {names}")
 
         if _is_path_target(filename):
             output_path = Path(filename).resolve()
@@ -810,9 +751,7 @@ class FigureCanvasTypstNative(FigureCanvasBase):
         config = _config_from_kwargs(kwargs)
         if kwargs:
             names = ", ".join(sorted(kwargs))
-            raise TypeError(
-                f"unsupported savefig argument(s) for Typst backend: {names}"
-            )
+            raise TypeError(f"unsupported savefig argument(s) for Typst backend: {names}")
 
         rc_root = mpl.rcParams["typst.root"]
         root_override = typst_root if typst_root is not None else rc_root
@@ -824,9 +763,7 @@ class FigureCanvasTypstNative(FigureCanvasBase):
                 image_prefix=output_path.stem,
                 config=config,
             )
-            root = (
-                Path(root_override).resolve() if root_override else output_path.parent
-            )
+            root = Path(root_override).resolve() if root_override else output_path.parent
         else:
             output_path = None
             typst_source = self._render_typst(config=config)
@@ -869,13 +806,38 @@ class FigureCanvasTypstNative(FigureCanvasBase):
             package_path = mpl.rcParams["typst.package_path"]
         if package_path is not None:
             compile_args["package_path"] = package_path
+        if config.engine in ("core", "auto") and _HAS_CORE:
+            measurer = _get_core_measurer()
+            if measurer is not None:
+                try:
+                    if suffix == "png":
+                        png_dpi = dpi if dpi is not None else ppi
+                        png_dpi = png_dpi if png_dpi is not None else self.figure.dpi
+                        compiled = measurer.render_png(typst_source, ppi=float(png_dpi))
+                    elif suffix == "pdf":
+                        compiled = measurer.render_pdf(typst_source)
+                    elif suffix == "svg":
+                        compiled = measurer.render_svg(typst_source).encode("utf-8")
+                    else:
+                        raise ValueError(f"unsupported format: {suffix}")
+
+                    if output_path is None:
+                        filename.write(compiled)
+                    else:
+                        with cbook.open_file_cm(filename, "wb") as target:
+                            target.write(compiled)
+                    return
+                except Exception:
+                    if config.engine == "core":
+                        raise
+
         try:
             compiled = typst.compile(
                 typst_source.encode("utf-8"),
                 **compile_args,
             )
         except typst.TypstError as exc:
-            raise RuntimeError("typst CLI executable was not found") from exc
+            raise RuntimeError(str(exc)) from exc
         if output_path is None:
             filename.write(compiled)
         else:
