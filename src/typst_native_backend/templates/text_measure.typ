@@ -15,7 +15,7 @@ ${measure_preamble}
     columns: 2,
     rows: 3,
     [#zws#anc(0)], [],
-    [#zws#anc(1)${text_body}], anc(2),
+    [#zws#anc(1);${text_body}], anc(2),
     zws, anc(3),
   )
 ]
