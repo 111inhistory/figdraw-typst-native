@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -48,6 +49,24 @@ def _is_path_target(filename) -> bool:
     return isinstance(filename, str | os.PathLike)
 
 
+_legacy_warned = False
+
+
+def _warn_legacy_engine() -> None:
+    """Warn once when the deprecated anchor-probe engine is actually used."""
+    global _legacy_warned
+    if _legacy_warned:
+        return
+    _legacy_warned = True
+    warnings.warn(
+        "the 'query' engine of figdraw-typst-native is deprecated and will be "
+        "removed in a future release; install `mpl-typst-core` (extra `core`) "
+        "or set mpl.rcParams['typst.engine'] = 'core'",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
 PACKAGE_DIR = Path(__file__).resolve().parent
 DOCUMENT_TEMPLATE = PACKAGE_DIR / "templates" / "native_document.typ"
 TEXT_MEASURE_TEMPLATE = PACKAGE_DIR / "templates" / "text_measure.typ"
@@ -68,7 +87,16 @@ class TypstNativeConfig:
     engine: str = "auto"
 
 
-_CONFIG = TypstNativeConfig()
+#: Extra keyword arguments Matplotlib passes to every ``print_*`` method.
+_MPL_NOISE_KWARGS = (
+    "bbox_inches_restore",
+    "edgecolor",
+    "facecolor",
+    "metadata",
+    "orientation",
+    "pil_kwargs",
+)
+
 _RC_DEFAULTS: dict[str, Any] = {
     "typst.document_template": str(DOCUMENT_TEMPLATE),
     "typst.text_measure_template": str(TEXT_MEASURE_TEMPLATE),
@@ -113,19 +141,22 @@ def register_rcparams() -> None:
 register_rcparams()
 
 
-def configure(**kwargs) -> None:
-    global _CONFIG
+#: ``typst_<field>`` -> ``<field>``, derived from :data:`_CONFIG_FIELDS`.
+_KWARG_FIELDS = {f"typst_{field}": field for field in _CONFIG_FIELDS}
 
+
+def configure(**kwargs) -> None:
+    """Set one or more Typst options as rcParams.
+
+    Accepts either the short field name (``engine="core"``) or the full
+    rcParam name (``**{"typst.engine": "core"}``).
+    """
     register_rcparams()
-    updates: dict[str, Any] = {}
     for key, value in kwargs.items():
         rc_key = _CONFIG_FIELDS.get(key, key)
         if not rc_key.startswith("typst."):
             raise KeyError(f"unsupported Typst native config key: {key}")
         mpl.rcParams[rc_key] = value
-        if key in _CONFIG_FIELDS:
-            updates[key] = value
-    _CONFIG = replace(_CONFIG, **updates) if updates else get_config()
 
 
 def get_config() -> TypstNativeConfig:
@@ -145,12 +176,10 @@ def get_config() -> TypstNativeConfig:
 
 
 def reset_config() -> None:
-    global _CONFIG
-
+    """Restore every Typst option to its default."""
     register_rcparams()
     for key, value in _RC_DEFAULTS.items():
         mpl.rcParams[key] = value
-    _CONFIG = TypstNativeConfig()
 
 
 #: Typst lengths are the only edge values that may be written unquoted.
@@ -231,23 +260,24 @@ def _text_body(text: str, ismath) -> Content:
 
 def _config_from_kwargs(kwargs: dict[str, Any]) -> TypstNativeConfig:
     config = kwargs.pop("typst_config", None) or get_config()
-    updates: dict[str, Any] = {}
-    names = {
-        "typst_document_template": "document_template",
-        "typst_text_measure_template": "text_measure_template",
-        "typst_font": "font",
-        "typst_text_top_edge": "text_top_edge",
-        "typst_page_padding": "page_padding",
-        "typst_par_leading": "par_leading",
-        "typst_par_spacing": "par_spacing",
-        "typst_preamble": "preamble",
-        "typst_measure_preamble": "measure_preamble",
-        "typst_engine": "engine",
+    updates = {
+        field: kwargs.pop(key) for key, field in _KWARG_FIELDS.items() if key in kwargs
     }
-    for key, field in names.items():
-        if key in kwargs:
-            updates[field] = kwargs.pop(key)
     return replace(config, **updates) if updates else config
+
+
+def _first(*values):
+    """First non-``None`` value, mirroring `savefig`'s explicit-wins-over-rcParam."""
+    return next((value for value in values if value is not None), None)
+
+
+def _reject_unknown_kwargs(kwargs: dict[str, Any]) -> None:
+    """Drop Matplotlib's noise kwargs and reject anything else."""
+    for name in _MPL_NOISE_KWARGS:
+        kwargs.pop(name, None)
+    if kwargs:
+        names = ", ".join(sorted(kwargs))
+        raise TypeError(f"unsupported savefig argument(s) for Typst backend: {names}")
 
 
 class TypstTextMeasurer:
@@ -265,8 +295,9 @@ class TypstTextMeasurer:
         self, text: str, size: float, ismath: bool | str, font_names: tuple[str, ...]
     ) -> tuple[float, float, float]:
         key = (text, size, ismath, font_names)
-        cached = self._cache.get(key)
-        if cached is not None:
+        cached = self._cache.pop(key, None)
+        if cached is not None:  # refresh recency
+            self._cache[key] = cached
             return cached
 
         metrics = self._measure_uncached(text, size, ismath, font_names)
@@ -284,11 +315,9 @@ class TypstTextMeasurer:
             if metrics is not None:
                 return metrics
             if engine == "core":
-                raise RuntimeError(
-                    "typst.engine='core' requires the optional `mpl-typst-core` "
-                    "package; install it or switch to 'query'/'auto'"
-                )
+                raise RuntimeError(_CORE_MISSING)
 
+        _warn_legacy_engine()
         text_body = _text_body(text, ismath).to_code(in_content=True)
         source = Template(
             Path(self.config.text_measure_template).read_text(encoding="utf-8")
@@ -317,7 +346,15 @@ class TypstTextMeasurer:
 
 @functools.lru_cache(maxsize=8)
 def _get_text_measurer(config: TypstNativeConfig) -> TypstTextMeasurer:
+    """Measurer used by the deprecated `query` engine."""
     return TypstTextMeasurer(config)
+
+
+#: Raised when the core engine is requested but not installed.
+_CORE_MISSING = (
+    "typst.engine='core' requires the optional `mpl-typst-core` package; "
+    "install it or use engine 'auto'/'query'"
+)
 
 
 def _font_families(font: str | Sequence[str] | Raw) -> list[str] | None:
@@ -372,7 +409,7 @@ def _measure_with_core(
 
 
 def clear_cache() -> None:
-    """Clear in-memory text measurement caches on both engines."""
+    """Clear the in-memory text measurement cache of both engines."""
     _get_text_measurer.cache_clear()
     global _core_measurer, _core_measurer_key
     _core_measurer = None
@@ -380,7 +417,11 @@ def clear_cache() -> None:
 
 
 def save_cache(file_path: str | os.PathLike) -> None:
-    """Explicitly save in-memory cache to a user-specified file path."""
+    """Persist the `query` engine's measurement cache to ``file_path``.
+
+    Deprecated together with the `query` engine; the `core` engine keeps its
+    measurements only in memory.
+    """
     path = Path(file_path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     measurer = _get_text_measurer(get_config())
@@ -393,7 +434,10 @@ def save_cache(file_path: str | os.PathLike) -> None:
 
 
 def load_cache(file_path: str | os.PathLike) -> int:
-    """Explicitly load cache from a user-specified file path."""
+    """Load a `query` engine measurement cache from ``file_path``.
+
+    Deprecated together with the `query` engine.
+    """
     path = Path(file_path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"Cache file not found: {path}")
@@ -842,19 +886,7 @@ class FigureCanvasTypstNative(FigureCanvasBase):
 
     def print_typ(self, filename, **kwargs):
         config = _config_from_kwargs(kwargs)
-        for key in (
-            "bbox_inches_restore",
-            "facecolor",
-            "edgecolor",
-            "orientation",
-            "metadata",
-        ):
-            kwargs.pop(key, None)
-        if kwargs:
-            names = ", ".join(sorted(kwargs))
-            raise TypeError(
-                f"unsupported savefig argument(s) for Typst backend: {names}"
-            )
+        _reject_unknown_kwargs(kwargs)
 
         if _is_path_target(filename):
             output_path = Path(filename).resolve()
@@ -894,23 +926,11 @@ class FigureCanvasTypstNative(FigureCanvasBase):
         typst_pdf_standards=None,
         package_path: str | os.PathLike | None = None,
         typst_package_path: str | os.PathLike | None = None,
-        bbox_inches_restore=None,
-        facecolor=None,
-        edgecolor=None,
-        orientation=None,
-        metadata=None,
-        pil_kwargs=None,
         **kwargs,
     ) -> None:
         config = _config_from_kwargs(kwargs)
-        if kwargs:
-            names = ", ".join(sorted(kwargs))
-            raise TypeError(
-                f"unsupported savefig argument(s) for Typst backend: {names}"
-            )
+        _reject_unknown_kwargs(kwargs)
 
-        rc_root = mpl.rcParams["typst.root"]
-        root_override = typst_root if typst_root is not None else rc_root
         if _is_path_target(filename):
             output_path = Path(filename).resolve()
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -919,86 +939,69 @@ class FigureCanvasTypstNative(FigureCanvasBase):
                 image_prefix=output_path.stem,
                 config=config,
             )
-            root = (
-                Path(root_override).resolve() if root_override else output_path.parent
-            )
         else:
             output_path = None
             typst_source = self._render_typst(config=config)
-            root = Path(root_override).resolve() if root_override else PACKAGE_DIR
 
-        compile_args: dict[str, Any] = {
-            "format": suffix,
-            "root": str(root),
-        }
-        if suffix == "png":
-            png_dpi = dpi if dpi is not None else ppi
-            compile_args["ppi"] = png_dpi if png_dpi is not None else self.figure.dpi
-        if typst_font_paths is not None:
-            font_paths = typst_font_paths
-        if font_paths is None:
-            font_paths = mpl.rcParams["typst.font_paths"]
-        if font_paths is not None:
-            compile_args["font_paths"] = font_paths
-        if typst_ignore_system_fonts is not None:
-            ignore_system_fonts = typst_ignore_system_fonts
-        if ignore_system_fonts is None:
-            ignore_system_fonts = mpl.rcParams["typst.ignore_system_fonts"]
-        if ignore_system_fonts is not None:
-            compile_args["ignore_system_fonts"] = ignore_system_fonts
-        if typst_sys_inputs is not None:
-            sys_inputs = typst_sys_inputs
-        if sys_inputs is None:
-            sys_inputs = mpl.rcParams["typst.sys_inputs"]
-        if sys_inputs is not None:
-            compile_args["sys_inputs"] = sys_inputs
-        if typst_pdf_standards is not None:
-            pdf_standards = typst_pdf_standards
-        if pdf_standards is None:
-            pdf_standards = mpl.rcParams["typst.pdf_standards"]
-        if pdf_standards is not None:
-            compile_args["pdf_standards"] = pdf_standards
-        if typst_package_path is not None:
-            package_path = typst_package_path
-        if package_path is None:
-            package_path = mpl.rcParams["typst.package_path"]
-        if package_path is not None:
-            compile_args["package_path"] = package_path
+        dpi_value = dpi if dpi is not None else ppi
+        dpi_value = dpi_value if dpi_value is not None else self.figure.dpi
+
         if config.engine in ("auto", "core"):
             measurer = _get_core_measurer()
             if measurer is not None:
                 if suffix == "png":
-                    png_dpi = dpi if dpi is not None else ppi
-                    png_dpi = png_dpi if png_dpi is not None else self.figure.dpi
-                    compiled = measurer.render_png(typst_source, ppi=float(png_dpi))
+                    compiled = measurer.render_png(typst_source, ppi=float(dpi_value))
                 elif suffix == "pdf":
                     compiled = measurer.render_pdf(typst_source)
                 else:
                     compiled = measurer.render_svg(typst_source).encode("utf-8")
-                if output_path is None:
-                    filename.write(compiled)
-                else:
-                    with cbook.open_file_cm(filename, "wb") as target:
-                        target.write(compiled)
+                self._write_compiled(filename, output_path, compiled)
                 return
             if config.engine == "core":
-                raise RuntimeError(
-                    "typst.engine='core' requires the optional `mpl-typst-core` "
-                    "package; install it or switch to 'query'/'auto'"
-                )
+                raise RuntimeError(_CORE_MISSING)
 
-        try:
-            compiled = typst.compile(
-                typst_source.encode("utf-8"),
-                **compile_args,
-            )
-        except typst.TypstError as exc:
-            raise RuntimeError("typst CLI executable was not found") from exc
+        # -- deprecated `query` engine: shell out to typst-py ---------------
+        _warn_legacy_engine()
+        root_override = typst_root if typst_root is not None else mpl.rcParams["typst.root"]
+        if root_override is not None:
+            root = Path(root_override).resolve()
+        elif output_path is not None:
+            root = output_path.parent
+        else:
+            root = PACKAGE_DIR
+
+        compile_args: dict[str, Any] = {"format": suffix, "root": str(root)}
+        if suffix == "png":
+            compile_args["ppi"] = dpi_value
+        optional = {
+            "font_paths": _first(typst_font_paths, font_paths, mpl.rcParams["typst.font_paths"]),
+            "ignore_system_fonts": _first(
+                typst_ignore_system_fonts,
+                ignore_system_fonts,
+                mpl.rcParams["typst.ignore_system_fonts"],
+            ),
+            "sys_inputs": _first(typst_sys_inputs, sys_inputs, mpl.rcParams["typst.sys_inputs"]),
+            "pdf_standards": _first(
+                typst_pdf_standards, pdf_standards, mpl.rcParams["typst.pdf_standards"]
+            ),
+            "package_path": _first(
+                typst_package_path, package_path, mpl.rcParams["typst.package_path"]
+            ),
+        }
+        compile_args.update({k: v for k, v in optional.items() if v is not None})
+
+        self._write_compiled(
+            filename, output_path, typst.compile(typst_source.encode("utf-8"), **compile_args)
+        )
+
+    @staticmethod
+    def _write_compiled(filename, output_path: Path | None, data) -> None:
+        """Write compiled bytes to a path or a file-like object."""
         if output_path is None:
-            filename.write(compiled)
+            filename.write(data)
         else:
             with cbook.open_file_cm(filename, "wb") as target:
-                target.write(compiled)
+                target.write(data)
 
     def print_pdf(self, filename, **kwargs):
         self._print_compiled(filename, "pdf", **kwargs)

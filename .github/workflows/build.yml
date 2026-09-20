@@ -1,0 +1,88 @@
+name: Build
+
+# Pure-Python package: sdist + wheel, an end-to-end smoke render, and a GitHub
+# release whenever a `v*` tag is pushed.
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The project pins a China mirror for local development; CI stays on PyPI.
+  UV_DEFAULT_INDEX: https://pypi.org/simple
+
+jobs:
+  check:
+    name: syntax + import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        run: uv sync
+      - name: Compile sources
+        run: |
+          uv run python -m py_compile \
+            src/typst_native_backend/__init__.py \
+            src/typst_native_backend/backend.py \
+            src/typst_native_backend/typst_core.py
+      - name: Import package
+        run: uv run python -c "import typst_native_backend, typst_native_backend.backend as b; print(b.get_config())"
+
+  build:
+    name: sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build distributions
+        run: uv build
+      - name: Smoke test the wheel
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/python - <<'PY'
+          import matplotlib as mpl
+          import typst_native_backend
+          mpl.use("module://typst_native_backend.backend")
+          import matplotlib.pyplot as plt
+          mpl.rcParams["typst.font"] = ("DejaVu Serif",)
+          fig, ax = plt.subplots(figsize=(2, 1.5))
+          ax.plot([0, 1, 2], [0, 1, 0])
+          ax.set_title(r"$E = mc^2$")
+          ax.set_xlabel(r"$x$")
+          for suffix in ("png", "pdf", "svg"):
+              fig.savefig(f"/tmp/smoke/out.{suffix}", dpi=72)
+          plt.close(fig)
+          print("smoke ok")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+  release:
+    name: attach artifacts to release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

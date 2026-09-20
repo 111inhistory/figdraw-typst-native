@@ -7,11 +7,20 @@
 
 | 引擎 | 说明 | 依赖 |
 | --- | --- | --- |
-| `core` | 通过 `mpl-typst_core` 常驻内存直接度量与导出，单次度量约 30 µs，无临时文件 | `mpl-typst-core` |
-| `query` | 原有实现：向 Typst 文档注入锚点并 `typst.query` 探测，配合 `typst.compile` 导出 | `typst-py` |
+| `core` | 通过 `mpl_typst_core` 常驻内存直接度量与导出，单次度量约 30 µs，无临时文件 | `mpl-typst-core` |
+| `query` | **已弃用**。向 Typst 文档注入锚点并 `typst.query` 探测，配合 `typst.compile` 导出 | `typst-py` |
 
-默认 `auto`：已安装 `mpl-typst-core` 时使用 `core`，否则平滑回退到 `query`。
+默认 `auto`：已安装 `mpl-typst-core` 时使用 `core`，否则回退到 `query`。
 可通过 `mpl.rcParams["typst.engine"] = "core" | "query" | "auto"` 强制指定。
+
+> **`query` 引擎已弃用**，将在后续版本移除。实际走到该引擎时会发出一次
+> `DeprecationWarning`。请安装 `figdraw-typst-native[core]`。
+
+### 已知限制
+
+`core` 引擎的字体来自构造时的 `typst.font_paths` / `typst.ignore_system_fonts`
+（即 rcParams）。`savefig(..., typst_font_paths=...)` 这类**单次调用覆盖仅对
+`query` 引擎生效**，`core` 引擎会忽略它们。
 
 ## 安装
 
@@ -36,7 +45,7 @@ uv add "figdraw-typst-native[core]"
 wheel 安装：
 
 ```powershell
-uv add ".\dist\figdraw_typst_native-0.1.0-py3-none-any.whl"
+uv add ".\dist\figdraw_typst_native-0.2.0-py3-none-any.whl"
 ```
 
 ## 使用
