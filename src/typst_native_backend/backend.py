@@ -4,6 +4,7 @@ import codecs
 import json
 import math
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -32,7 +33,6 @@ from .typst_core import (  # noqa: F401
     Raw,
     Rgb,
     TypstType,
-    math_text,
     normalize_string,
 )
 
@@ -150,6 +150,37 @@ def _font_code(font: str | Sequence[str] | Raw) -> str:
     return "(" + ", ".join(f'"{normalize_string(item)}"' for item in font) + ")"
 
 
+def _text_body(text: str, ismath) -> Content:
+    text_content = text.replace(r"\$", "$")
+    if ismath not in (True, "TeX"):
+        return Content(text_content)
+
+    dollar_indices = [
+        match.end() - 1 for match in re.finditer(r"(?<!\\)(?:\\\\)*\$", text)
+    ]
+    if len(dollar_indices) == 0:
+        if ismath is not True:
+            return Content(text_content)
+        fragment = re.sub(r"\\mathdefault\{([^{}]*)\}", r"\1", text.strip())
+        return Content(Command("mi", Raw(f'"{normalize_string(fragment)}"')))
+    if len(dollar_indices) % 2 != 0:
+        return Content(text_content)
+
+    parts: list[TypstType] = []
+    cursor = 0
+    for start, end in zip(dollar_indices[0::2], dollar_indices[1::2], strict=True):
+        if start > cursor:
+            parts.append(text[cursor:start].replace(r"\$", "$"))
+        fragment = re.sub(
+            r"\\mathdefault\{([^{}]*)\}", r"\1", text[start + 1 : end].strip()
+        )
+        parts.append(Command("mi", Raw(f'"{normalize_string(fragment)}"')))
+        cursor = end + 1
+    if cursor < len(text):
+        parts.append(text[cursor:].replace(r"\$", "$"))
+    return Content(*parts)
+
+
 def _config_from_kwargs(kwargs: dict[str, Any]) -> TypstNativeConfig:
     config = kwargs.pop("typst_config", None) or get_config()
     updates: dict[str, Any] = {}
@@ -235,16 +266,11 @@ class RendererTypst(RendererBase):
             return cached
 
         try:
-            is_math = ismath is True or (
-                ismath == "TeX"
-                and str(s).strip().startswith("$")
-                and str(s).strip().endswith("$")
-            )
-            text_body = str(Content(math_text(str(s)) if is_math else str(s)))
+            text_body = _text_body(str(s), ismath).to_code(in_content=True)
             source = Template(
                 Path(self.config.text_measure_template).read_text(encoding="utf-8")
             ).substitute(
-                font_size=str(Length(size)),
+                font_size=Length(size).to_code(),
                 text_font=_font_code(self.config.font),
                 text_top_edge=self.config.text_top_edge,
                 par_leading=self.config.par_leading,
@@ -268,7 +294,7 @@ class RendererTypst(RendererBase):
                 self.points_to_pixels(height),
                 self.points_to_pixels(descent),
             )
-        except Exception:
+        except Exception as e:
             result = self._agg.get_text_width_height_descent(s, prop, ismath)
 
         self._text_measure_cache[cache_key] = result
@@ -494,13 +520,7 @@ class RendererTypst(RendererBase):
         if len(rgb) < 3:
             raise ValueError("text color must contain at least RGB channels")
 
-        text_source = str(s).strip()
-        is_math = ismath is True or (
-            ismath == "TeX"
-            and text_source.startswith("$")
-            and text_source.endswith("$")
-        )
-        body = math_text(str(s)) if is_math else Content(str(s))
+        body = _text_body(str(s), ismath)
         text = Command(
             "text",
             body,
@@ -644,11 +664,19 @@ class FigureCanvasTypstNative(FigureCanvasBase):
 
     def print_typ(self, filename, **kwargs):
         config = _config_from_kwargs(kwargs)
-        for key in ("bbox_inches_restore", "facecolor", "edgecolor", "orientation", "metadata"):
+        for key in (
+            "bbox_inches_restore",
+            "facecolor",
+            "edgecolor",
+            "orientation",
+            "metadata",
+        ):
             kwargs.pop(key, None)
         if kwargs:
             names = ", ".join(sorted(kwargs))
-            raise TypeError(f"unsupported savefig argument(s) for Typst backend: {names}")
+            raise TypeError(
+                f"unsupported savefig argument(s) for Typst backend: {names}"
+            )
 
         if _is_path_target(filename):
             output_path = Path(filename).resolve()
@@ -699,7 +727,9 @@ class FigureCanvasTypstNative(FigureCanvasBase):
         config = _config_from_kwargs(kwargs)
         if kwargs:
             names = ", ".join(sorted(kwargs))
-            raise TypeError(f"unsupported savefig argument(s) for Typst backend: {names}")
+            raise TypeError(
+                f"unsupported savefig argument(s) for Typst backend: {names}"
+            )
 
         rc_root = mpl.rcParams["typst.root"]
         root_override = typst_root if typst_root is not None else rc_root
@@ -711,7 +741,9 @@ class FigureCanvasTypstNative(FigureCanvasBase):
                 image_prefix=output_path.stem,
                 config=config,
             )
-            root = Path(root_override).resolve() if root_override else output_path.parent
+            root = (
+                Path(root_override).resolve() if root_override else output_path.parent
+            )
         else:
             output_path = None
             typst_source = self._render_typst(config=config)
@@ -760,7 +792,7 @@ class FigureCanvasTypstNative(FigureCanvasBase):
                 **compile_args,
             )
         except typst.TypstError as exc:
-            raise RuntimeError(str(exc)) from exc
+            raise RuntimeError("typst CLI executable was not found") from exc
         if output_path is None:
             filename.write(compiled)
         else:

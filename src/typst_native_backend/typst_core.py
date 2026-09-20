@@ -1,8 +1,5 @@
 from typing import Any, Callable, Union
 
-import re
-
-
 def normalize_string(s: str) -> str:
     # pls note that the order of the replacements matters, e.g., "\\" should be replaced before "\n", etc.
     rep_dict = {
@@ -27,6 +24,7 @@ def normalize_content(s: str) -> str:
         "$": "\\$",
         "*": "\\*",
         "_": "\\_",
+        "\n": "#linebreak()",
     }
     # Backslash must be escaped first to avoid double-escaping generated slashes.
     for key, rep in rep_dict.items():
@@ -79,7 +77,7 @@ def format_typst_value(
 class Length:
     def __init__(
         self,
-        val: int | float | Length,
+        val: int | float | "Length",
         *,
         unit: str = "pt",
         fmt: str = "{value:.6f}{unit}",
@@ -134,8 +132,10 @@ class Content:
             format_typst_value(item, in_content=True) for item in self.content
         )
 
-    def to_code(self) -> str:
-        return f"[{self.inner_code()}]"
+    def to_code(self, in_content: bool = False) -> str:
+        if in_content:
+            return self.inner_code()
+        return f'[{self.inner_code()}]'
 
 
 class Raw:
@@ -229,14 +229,3 @@ class Rgb(Command):
             channels.pop()
         hex_color = "".join(f"{channel:02X}" for channel in channels)
         super().__init__("rgb", Raw(f'"#{hex_color}"'))
-
-
-def math_text(s: str) -> Command:
-    """Helper function to wrap math text into a Command."""
-    # Normalize Matplotlib math text before sending it to MiTeX.
-    text = s.strip()
-    if len(text) >= 2 and text.startswith("$") and text.endswith("$"):
-        text = text[1:-1]
-    # Matplotlib wraps default math text fragments in this internal command.
-    text = re.sub(r"\\mathdefault\{([^{}]*)\}", r"\1", text)
-    return Command("mi", Raw(f'"{normalize_string(text)}"'))
