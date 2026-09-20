@@ -3,12 +3,19 @@ name = "figdraw-typst-native"
 version = "0.1.0"
 description = "Native Typst backend for Matplotlib"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.14"
 dependencies = [
     "matplotlib>=3.10.9",
     "pillow>=12.0.0",
     "typst>=0.14.8",
 ]
+
+[project.optional-dependencies]
+# Native Rust core: microsecond in-memory text measurement and PDF/PNG/SVG
+# export without spawning `typst-py` or a `typst` CLI subprocess.
+# Install with `pip install figdraw-typst-native[core]`.
+core = ["mpl-typst-core"]
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]
@@ -24,6 +31,9 @@ packages = [
 
 [tool.setuptools.package-data]
 typst_native_backend = ["templates/*.typ", "utils/*.typ"]
+
+[tool.uv.sources]
+mpl-typst-core = { git = "https://github.com/111inhistory/mpl_typst_core" }
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"

@@ -1,23 +1,39 @@
 # figdraw-typst-native
 
-`figdraw-typst-native` 是一个 Matplotlib 后端，用于直接生成原生 Typst
-绘图代码，并可通过 `typst-py` 编译为 PDF、SVG 或 PNG。
+`figdraw-typst-native` 是一个 Matplotlib 后端，可以直接用原生 Typst 排版绘图文字，
+并导出为 PDF、SVG 与 PNG。
+
+文本度量与文档导出支持两套引擎：
+
+| 引擎 | 说明 | 依赖 |
+| --- | --- | --- |
+| `core` | 通过 `mpl-typst_core` 常驻内存直接度量与导出，单次度量约 30 µs，无临时文件 | `mpl-typst-core` |
+| `query` | 原有实现：向 Typst 文档注入锚点并 `typst.query` 探测，配合 `typst.compile` 导出 | `typst-py` |
+
+默认 `auto`：已安装 `mpl-typst-core` 时使用 `core`，否则平滑回退到 `query`。
+可通过 `mpl.rcParams["typst.engine"] = "core" | "query" | "auto"` 强制指定。
 
 ## 安装
 
-本地路径依赖：
+本地路径安装：
 
 ```powershell
 uv add "E:\LanguageSpecific\Typst\figdraw-typst-native"
 ```
 
-GitHub 依赖：
+GitHub 安装：
 
 ```powershell
-uv add "git+ssh://git@github.com/111inhistory/figdraw-typst-native.git"
+uv add "git+ssh://git@github.com:111inhistory/figdraw-typst-native.git"
 ```
 
-wheel 依赖：
+启用原生核心引擎（推荐）：
+
+```powershell
+uv add "figdraw-typst-native[core]"
+```
+
+wheel 安装：
 
 ```powershell
 uv add ".\dist\figdraw_typst_native-0.1.0-py3-none-any.whl"
@@ -25,19 +41,17 @@ uv add ".\dist\figdraw_typst_native-0.1.0-py3-none-any.whl"
 
 ## 使用
 
-启用后端：
+`use()` 便捷入口：
 
 ```python
 import typst_native_backend
-
 typst_native_backend.use()
 ```
 
-也可以直接使用 Matplotlib 的 backend 字符串：
+也可以直接使用 Matplotlib backend 字符串：
 
 ```python
 import matplotlib
-
 matplotlib.use("module://typst_native_backend.backend")
 ```
 
@@ -45,17 +59,13 @@ matplotlib.use("module://typst_native_backend.backend")
 
 ```python
 from pathlib import Path
-
 import matplotlib.pyplot as plt
 import typst_native_backend
-
 typst_native_backend.use()
-
 fig, ax = plt.subplots(figsize=(3, 2))
 ax.plot([0, 1, 2], [0, 1, 0])
 ax.set_xlabel("x")
 ax.set_ylabel("y")
-
 out = Path("outputs")
 out.mkdir(exist_ok=True)
 fig.savefig(out / "figure.typ")
@@ -71,7 +81,7 @@ PNG 使用 Matplotlib 习惯的 `dpi`：
 fig.savefig("figure.png", dpi=300)
 ```
 
-Typst 编译参数可以通过 `savefig` 传入：
+Typst 编译参数通过 `savefig` 传入：
 
 ```python
 fig.savefig(
@@ -82,7 +92,7 @@ fig.savefig(
 )
 ```
 
-支持的编译参数包括：
+支持的编译参数：
 
 - `typst_root`
 - `typst_font_paths`
@@ -91,29 +101,29 @@ fig.savefig(
 - `typst_pdf_standards`
 - `typst_package_path`
 
-## 模板配置
+## 模板与配置
 
 全局配置使用 Matplotlib 的 `rcParams`：
 
 ```python
 import matplotlib as mpl
 import typst_native_backend
-
 mpl.rcParams["typst.font"] = ("Times New Roman", "SimSun")
 mpl.rcParams["typst.page_padding"] = 12
 mpl.rcParams["typst.preamble"] = "#set text(fill: black)"
+mpl.rcParams["typst.engine"] = "core"
 ```
 
-`typst_native_backend` 被导入时会注册这些 `rcParams` key。若直接写
-`mpl.rcParams["typst.font"]`，需要先导入一次后端包。
+`typst_native_backend` 在导入时自动注册这些 `rcParams` key，因此可以直接写
+`mpl.rcParams["typst.font"]`，不需要先调用一次后端。
 
-恢复默认配置可以使用兼容函数：
+恢复默认配置可以使用便捷函数：
 
 ```python
 typst_native_backend.reset_config()
 ```
 
-单次导出覆盖：
+单次覆盖（优先级最高）：
 
 ```python
 fig.savefig(
@@ -124,12 +134,13 @@ fig.savefig(
 )
 ```
 
-可配置项：
+完整键值：
 
-模板和排版：
+模块与排版：
 
 - `typst.document_template`
 - `typst.text_measure_template`
+- `typst.engine`
 - `typst.font`
 - `typst.text_top_edge`
 - `typst.page_padding`
@@ -147,7 +158,7 @@ Typst 编译：
 - `typst.pdf_standards`
 - `typst.package_path`
 
-单次 `savefig` 覆盖参数仍保留 `typst_` 前缀，例如：
+所有 `savefig` 关键字都带有 `typst_` 前缀，例如：
 
 - `typst_font`
 - `typst_page_padding`
@@ -163,7 +174,7 @@ Typst 编译：
 uv sync
 ```
 
-基础检查：
+语法检查：
 
 ```powershell
 uv run python -m py_compile `
@@ -177,3 +188,7 @@ uv run python -m py_compile `
 ```powershell
 uv build --wheel
 ```
+
+## 许可证
+
+MIT License。
