@@ -112,7 +112,17 @@ mpl.rcParams["typst.font"] = ("Times New Roman", "SimSun")
 mpl.rcParams["typst.page_padding"] = 12
 mpl.rcParams["typst.preamble"] = "#set text(fill: black)"
 mpl.rcParams["typst.engine"] = "core"
+mpl.rcParams["typst.text_top_edge"] = "cap-height"  # Typst 默认值
 ```
+
+`typst.text_top_edge` 接受 Typst 的长度（`1em`、`12pt`、`2mm`）或度量名
+（`cap-height`、`ascender`、`x-height`、`baseline`、`bounds`）。度量名会
+自动加引号；长度原样输出。`bottom-edge` 未暴露为配置项，保持 Typst 的默认
+`baseline`，与渲染模板一致。
+
+> 注意：早先的默认值是 `1em`，那只是为了绕开旧模板把度量名当变量引用的缺陷
+> （`top-edge: cap-height` → `unknown variable`）。该缺陷已修复，默认值恢复为
+> Typst 原生的 `cap-height`。
 
 `typst_native_backend` 在导入时自动注册这些 `rcParams` key，因此可以直接写
 `mpl.rcParams["typst.font"]`，不需要先调用一次后端。

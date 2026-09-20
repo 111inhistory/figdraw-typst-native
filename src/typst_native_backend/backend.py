@@ -59,7 +59,7 @@ class TypstNativeConfig:
     document_template: str | os.PathLike = DOCUMENT_TEMPLATE
     text_measure_template: str | os.PathLike = TEXT_MEASURE_TEMPLATE
     font: str | Sequence[str] | Raw = ("Times New Roman", "SimSun")
-    text_top_edge: str = "1em"
+    text_top_edge: str = "cap-height"
     page_padding: float = PAGE_PADDING_PT
     par_leading: str = "0pt"
     par_spacing: str = "0pt"
@@ -73,7 +73,7 @@ _RC_DEFAULTS: dict[str, Any] = {
     "typst.document_template": str(DOCUMENT_TEMPLATE),
     "typst.text_measure_template": str(TEXT_MEASURE_TEMPLATE),
     "typst.font": ("Times New Roman", "SimSun"),
-    "typst.text_top_edge": "1em",
+    "typst.text_top_edge": "cap-height",
     "typst.page_padding": PAGE_PADDING_PT,
     "typst.par_leading": "0pt",
     "typst.par_spacing": "0pt",
@@ -151,6 +151,25 @@ def reset_config() -> None:
     for key, value in _RC_DEFAULTS.items():
         mpl.rcParams[key] = value
     _CONFIG = TypstNativeConfig()
+
+
+#: Typst lengths are the only edge values that may be written unquoted.
+_LENGTH_CODE = re.compile(r"^-?(?:\d+\.?\d*|\.\d+)(?:pt|mm|cm|in|em|rem|%)$")
+
+
+def _edge_code(value: str | Raw) -> str:
+    """Return Typst code for a `text` edge (`top-edge` / `bottom-edge`).
+
+    Lengths such as `1em` are emitted verbatim; metric names such as
+    `cap-height` are quoted, because an unquoted metric name is parsed as a
+    variable reference and fails with "unknown variable".
+    """
+    if isinstance(value, Raw):
+        return value.to_code()
+    text = str(value).strip()
+    if _LENGTH_CODE.match(text):
+        return text
+    return f'"{normalize_string(text)}"'
 
 
 def _font_code(font: str | Sequence[str] | Raw) -> str:
@@ -276,7 +295,7 @@ class TypstTextMeasurer:
         ).substitute(
             font_size=Length(size).to_code(),
             text_font=_font_code(self.config.font),
-            text_top_edge=self.config.text_top_edge,
+            text_top_edge=_edge_code(self.config.text_top_edge),
             par_leading=self.config.par_leading,
             par_spacing=self.config.par_spacing,
             measure_preamble=self.config.measure_preamble,
@@ -783,7 +802,7 @@ class RendererTypst(RendererBase):
             canvas_width=f"{self.width_pt:.6f}pt",
             canvas_height=f"{self.height_pt:.6f}pt",
             text_font=_font_code(self.config.font),
-            text_top_edge=self.config.text_top_edge,
+            text_top_edge=_edge_code(self.config.text_top_edge),
             par_leading=self.config.par_leading,
             par_spacing=self.config.par_spacing,
             preamble=self.config.preamble,
